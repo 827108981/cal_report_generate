@@ -1,0 +1,18 @@
+{
+  "task_id": "20260711_102115_BS5000",
+  "model_key": "bs5000",
+  "created_at": "2026-07-11T10:22:24",
+  "assets": {
+    "09_01_WASTE_DISCHARGE": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_01_WASTE_DISCHARGE_01.png",
+        "source_type": "capture",
+        "original_path": "",
+        "width": 1920,
+        "height": 1200,
+        "sha256": "78fac8ac20c728e8b1873b76a44c1d5c16cdbf682ef716ecba842bd3a94b4f3a"
+      }
+    ]
+  }
+}

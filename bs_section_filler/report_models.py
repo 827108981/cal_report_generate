@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .hierarchical_filler import MatchLog, fill_report_tables, save_logs
+from screenshot_pipeline.pipeline import insert_task_screenshots
 
 
 @dataclass(frozen=True)
@@ -42,31 +43,31 @@ class ReportGenerationResult:
 
 
 MODELS: dict[str, ReportModel] = {
-    'bs2800': ReportModel(
-        key='bs2800',
-        display_name='BS-2800M系列',
-        output_filename='BS-2800M系列_全自动生化分析仪仪器校准报告_自动生成.docx',
+    "bs2800": ReportModel(
+        key="bs2800",
+        display_name="BS-2800M系列",
+        output_filename="BS-2800M系列_全自动生化分析仪仪器校准报告_自动生成.docx",
         template_patterns=(
-            'BS2800/*_全自动生化分析仪仪器校准报告*_V*.docx',
-            '*BS-2800M系列*_全自动生化分析仪仪器校准报告*_V*.docx',
-            'BS2800/*.docx',
-            '*.docx',
+            "BS2800/*_全自动生化分析仪仪器校准报告*_V*.docx",
+            "*BS-2800M系列*_全自动生化分析仪仪器校准报告*_V*.docx",
+            "BS2800/*.docx",
+            "*.docx",
         ),
         excel_inputs=(
-            ExcelInputSpec('m1', 'M1 校准报告 Excel', True, ('BS2800/*M1*.xlsx', '*M1*校准报告.xlsx')),
-            ExcelInputSpec('m2', 'M2 校准报告 Excel', False, ('BS2800/*M2*.xlsx', '*M2*校准报告.xlsx')),
+            ExcelInputSpec("m1", "M1 校准报告 Excel", True, ("BS2800/*M1*.xlsx", "*M1*校准报告.xlsx")),
+            ExcelInputSpec("m2", "M2 校准报告 Excel", False, ("BS2800/*M2*.xlsx", "*M2*校准报告.xlsx")),
         ),
     ),
-    'bs5000': ReportModel(
-        key='bs5000',
-        display_name='BS-5000系列',
-        output_filename='BS-5000系列_全自动生化分析仪仪器校准报告_自动生成.docx',
+    "bs5000": ReportModel(
+        key="bs5000",
+        display_name="BS-5000系列",
+        output_filename="BS-5000系列_全自动生化分析仪仪器校准报告_自动生成.docx",
         template_patterns=(
-            'BS5000/*_全自动生化分析仪仪器校准报告*_V*.docx',
-            'BS5000/*.docx',
+            "BS5000/*_全自动生化分析仪仪器校准报告*_V*.docx",
+            "BS5000/*.docx",
         ),
         excel_inputs=(
-            ExcelInputSpec('m1', '校准报告 Excel', True, ('BS5000/*校准报告*.xlsx', 'BS5000/*.xlsx')),
+            ExcelInputSpec("m1", "校准报告 Excel", True, ("BS5000/*校准报告*.xlsx", "BS5000/*.xlsx")),
         ),
         delete_tail_sections_default=False,
     ),
@@ -77,8 +78,7 @@ def get_model(model_key: str) -> ReportModel:
     try:
         return MODELS[model_key]
     except KeyError as exc:
-        choices = ', '.join(MODELS)
-        raise ValueError(f'未知机型：{model_key}。可选：{choices}') from exc
+        raise ValueError(f"未知机型：{model_key}。可选：{', '.join(MODELS)}") from exc
 
 
 def list_models() -> list[ReportModel]:
@@ -87,7 +87,7 @@ def list_models() -> list[ReportModel]:
 
 def _first_existing(base_dir: Path, patterns: tuple[str, ...]) -> Path | None:
     for pattern in patterns:
-        matches = sorted(p for p in base_dir.glob(pattern) if p.is_file())
+        matches = sorted(path for path in base_dir.glob(pattern) if path.is_file())
         if matches:
             return matches[0]
     return None
@@ -110,7 +110,7 @@ def default_output_path(model_key: str, out_dir: str | Path) -> Path:
 
 
 def _match_count(matches: list[MatchLog]) -> int:
-    return sum(1 for item in matches if item.note == '已匹配')
+    return sum(1 for item in matches if item.note == "已匹配")
 
 
 def generate_report_for_model(
@@ -118,31 +118,40 @@ def generate_report_for_model(
     template_path: str | Path,
     excel_paths: dict[str, str | Path],
     output_path: str | Path,
-    formula_policy: str = 'all',
+    formula_policy: str = "all",
     overwrite_nonblank: bool = True,
     delete_tail_sections: bool | None = None,
+    screenshot_task_dir: str | Path | None = None,
+    screenshot_resource_dir: str | Path | None = None,
 ) -> ReportGenerationResult:
     model = get_model(model_key)
     if not str(template_path).strip():
-        raise ValueError('缺少 Word 空模板。')
+        raise ValueError("缺少 Word 空模板。")
     template = Path(template_path)
     out = Path(output_path)
-
     missing = [spec.label for spec in model.excel_inputs if spec.required and not excel_paths.get(spec.key)]
     if missing:
-        raise ValueError('缺少必填文件：' + '、'.join(missing))
-
+        raise ValueError("缺少必填文件：" + "、".join(missing))
     tail_policy = model.delete_tail_sections_default if delete_tail_sections is None else delete_tail_sections
     logs, matches, warnings = fill_report_tables(
         template_path=template,
         output_path=out,
-        m1_excel=excel_paths['m1'],
-        m2_excel=excel_paths.get('m2') or None,
+        m1_excel=excel_paths["m1"],
+        m2_excel=excel_paths.get("m2") or None,
         formula_policy=formula_policy,
         overwrite_nonblank=overwrite_nonblank,
         delete_tail_sections=tail_policy,
     )
     fill_log, match_log = save_logs(logs, matches, out)
+    if screenshot_task_dir:
+        screenshot_warnings = insert_task_screenshots(
+            output_path=out,
+            task_dir=screenshot_task_dir,
+            resource_dir=screenshot_resource_dir,
+        )
+        warnings.extend(screenshot_warnings)
+    if not out.exists() or out.stat().st_size <= 0:
+        raise RuntimeError(f"报告保存失败：{out}")
     return ReportGenerationResult(
         output_path=out,
         fill_log_path=fill_log,

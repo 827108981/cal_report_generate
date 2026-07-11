@@ -1,46 +1,147 @@
-# BS 校准报告生成工具
+# 化免校准报告自动生成工具
 
-支持 BS-2800M 系列和 BS-5000 系列校准报告生成。核心逻辑共用同一套 Word/Excel 表格匹配引擎，机型差异集中在 `bs_section_filler/report_models.py` 配置中。
+本代码基于 GitHub 仓库 `827108981/cal_report_generate` 当前 `main` 分支的多机型结构继续开发，保留 `BS-2800M` / `BS-5000` 共用匹配引擎和 `report_models.py` 机型注册方式。
 
-## GUI 使用
+## 本次修复
+
+### 1. EXE 已生成文件，但界面一直不提示“导出成功”
+
+根因有两处：
+
+- 后台线程直接读取 Tkinter 变量，打包后可能导致线程异常或界面回调无法完成；
+- 报告保存后还要等待 Microsoft Word COM 更新目录和域，Word 启动、修复提示或后台阻塞会让进度条一直转，即使 `result` 中已经有报告。
+
+现在的处理方式：
+
+- 所有 Tkinter 变量都在主线程中提前读取并转换为普通值；
+- Word 文件成功保存并校验存在后，立即停止进度条并弹出“导出成功”；
+- Word COM 更新改为成功后的独立后台步骤，不再阻塞导出成功提示；
+- 后台 COM 线程显式调用 `pythoncom.CoInitialize()` / `CoUninitialize()`。
+
+### 2. BS-5000：ISE模块1 / 5、电解质携带污染率与 Excel 不一致
+
+原始 Excel 的关键结果单元格使用了 `SUM(...)` 参与计算，但工作簿缓存值是 `#DIV/0!`。原代码的公式计算器不支持 `SUM`，因此未能重新计算，Word 中保留了模板旧值。
+
+本版增加 `SUM` 支持，并用原始数据重新计算：
+
+| 项目 | Na | K | Cl |
+|---|---:|---:|---:|
+| CLH | 0.61% | 0.63% | 0.88% |
+| CHL | 0.39% | 0.58% | 0.44% |
+| 结论 | ■ Pass | ■ Pass | ■ Pass |
+
+上述数值已通过自动化回归测试验证，最终 Word 表格也与当前 Excel 计算结果一致。
+
+### 3. BS-5000：（十一）样本携带污染率检测变空或内外圈数据重复
+
+- 按“内圈/外圈”分组匹配同名数据行；
+- 兼容 Word“均值”和 Excel“最大值”的名称差异；
+- 内圈、外圈测量值、参考色素值、携带污染率和结论均分别填充。
+
+### 4. BS-5000：（十三）临床测试精密度及准确性变空
+
+- 不再把整张 Word 表匹配到只有一行的章节说明文字；
+- 精密度表选择实际 1~20 次测量数据块；
+- 准确性表按表头字段定位列，Excel 中间空字段不会导致数据错列；
+- 水平1、水平2按各自分组匹配。
+
+
+### 5. 无数据来源时禁止跨表或公式兜底填充
+
+- “吸光度/结果”的光度法表与“M0/M1/加样量”的称重法表严格区分；
+- Excel 没有称重法数据时，对应 Word 称重法表保持空白；
+- 临床准确性只有在对应行存在真实“质控靶值”时才填充；
+- 靶值为空时，不生成范围低限、范围高限、实测值和是否在控结果；
+- 临床准确性专用逻辑不再回退到普通连续填充。
+
+## 目录说明
+
+```text
+BS5000/
+  BS-5000 校准报告.xlsx
+  BS-5000系列_全自动生化分析仪仪器校准报告_V1.0_CH.docx
+bs_section_filler/
+  excel_blocks.py          Excel 分块与公式计算
+  word_blocks.py           Word 表格分块
+  hierarchical_filler.py   分层匹配与填充
+  report_models.py         多机型注册和生成入口
+  word_com.py              Word 域后台更新
+  screenshot_pipeline/     截图任务、采集、校验和 Word 插图
+run_gui.py                 图形界面
+generate_report.py         命令行入口
+tests/                     BS-5000 回归测试
+build_exe.bat              Windows 打包脚本
+```
+
+## 直接运行
 
 ```bat
-run_gui.bat
+py -3.14 -m pip install -r requirements.txt
+py -3.14 run_gui.py
 ```
 
-界面中选择机型后，程序会尝试自动带出当前目录下的模板和原始 Excel：
+界面选择 `BS-5000系列` 后，会自动识别 `BS5000` 目录里的空模板和 Excel。
 
-- BS-2800M 系列：`BS2800` 目录下的 M1/M2 校准报告 Excel。
-- BS-5000 系列：`BS5000` 目录下的校准报告 Excel 和 Word 空模板。
+## 命令行验证
 
-输出文件默认保存到 `result` 目录，同时生成：
-
-- `*_填充日志.csv`
-- `*_匹配日志.csv`
-
-## 命令行使用
-
-自动查找 BS-5000 目录中的模板和 Excel，输出到 `result`：
-
-```bash
-python generate_report.py --model bs5000
+```bat
+py -3.14 generate_report.py --model bs5000
 ```
 
-指定文件：
+## 运行回归测试
 
-```bash
-python generate_report.py --model bs5000 --template BS5000/模板.docx --excel BS5000/校准报告.xlsx --out result/报告.docx
+```bat
+run_tests.bat
 ```
 
-BS-2800M 双模块：
+或：
 
-```bash
-python generate_report.py --model bs2800 --template 空模板.docx --m1 M1.xlsx --m2 M2.xlsx --out result/报告.docx
+```bat
+py -3.14 -m unittest discover -s tests -v
 ```
 
-## 常用选项
+## 打包 EXE
 
-- `--formula-policy all|auto|raw`：默认 `all`，同步 Excel 中已计算结果。
-- `--no-overwrite-nonblank`：只写空白或占位单元格。
-- `--update-word-fields`：调用本机 Microsoft Word 更新域、目录和公式。
-- `--keep-tail-sections`：保留顶层六、七、八、九章节。
+```bat
+build_exe.bat
+```
+
+生成文件：
+
+```text
+dist\化免校准报告自动生成工具.exe
+```
+
+打包脚本会固定包含 `BS5000` 资源；如果代码目录同时存在 `BS2800`，也会一并打包。
+
+## 使用提醒
+
+- 默认公式策略为 `all`，用于同步 Excel 中的已计算结果以及本地可重算公式。
+- 报告保存成功后会先提示“导出成功”；如果勾选“后台更新 Word 域”，目录和域会继续在后台更新。
+- 后台 Word 更新失败不会回滚已生成的报告，详细原因会显示在界面日志中。
+- Word COM 功能需要 Windows 安装 Microsoft Word 和 `pywin32`。
+
+## 截图采集与原始数据图片
+
+界面中的“截图任务目录”支持新建截图任务。点击“截图采集”后，选择项目即可：
+
+- “截取屏幕”会先冻结当前屏幕，再框选区域，避免把采集工具本身截入图片；
+- “选择本地照片”支持一次选择多张图片；
+- 图片由程序自动复制、编号和命名，不要求一线人员改名；
+- 同一项目的多张图片可以上移、下移、删除和重新导入；
+- 任务目录保存 `task.json`，包含图片顺序、来源、尺寸和校验值；
+- 生成报告时，图片按照 `BS2800/screenshot_map.json` 或 `BS5000/screenshot_map.json` 的配置插入第九章。
+
+Word 模板可以使用 `{{SCREENSHOT:...}}` 占位标记；如果没有标记，程序会按机型配置中的章节标题插入图片。截图任务目录不要求安装 Microsoft Word。
+
+### 一线截图操作
+
+1. 选择机型后，点击“开始 / 继续采集”。
+2. 在采集清单中选择当前项目。
+3. 保持截图采集窗口打开，切回仪器软件界面。
+4. 按 `F8`：工具先取得电脑整屏原始分辨率图片，再弹出原图框选窗口；拖动鼠标框选后按 `Enter` 保存。
+5. 按 `F9`：直接保存当前整屏原始分辨率截图。
+6. 回到采集窗口检查预览和图片顺序；报告会按“图片顺序”从上到下插入。
+7. 点击“完成采集并返回报告”，再点击“生成校准报告”。
+
+全局快捷键只在“原始数据截图”窗口保持打开时生效。若 F8 或 F9 被其他程序占用，窗口会给出提示，仍可直接点击对应截图按钮。

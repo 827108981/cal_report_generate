@@ -1,0 +1,84 @@
+{
+  "task_id": "20260711_102902_BS5000",
+  "model_key": "bs5000",
+  "created_at": "2026-07-11T10:29:02",
+  "assets": {
+    "09_01_WASTE_DISCHARGE": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_01_WASTE_DISCHARGE_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\01.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "1bac136adb8e0dd3f64a2559e5b3f553b9db225d47edbef32accd9509aa94313"
+      }
+    ],
+    "09_02_SYSTEM_OVERVIEW": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_02_SYSTEM_OVERVIEW_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\02.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "eb6490e5be1ac7f92f67ffc98d009e2fcdfa526e65ba124d88917a0c44bd62e2"
+      }
+    ],
+    "09_03_POWER": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_03_POWER_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\03.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "a8303876a6ea4d183e89775fe1171a47270fdae71a7cd1d3fd4f673f5ceaba6e"
+      }
+    ],
+    "09_04_FLUID_PATH": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_04_FLUID_PATH_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\04.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "b5d1079ee817e0a3df0674f665d7fe10d67283d6fb3242c67cba7514dbdac4ae"
+      }
+    ],
+    "09_05_LOWER_UNIT": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_05_LOWER_UNIT_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\05.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "edf7fbd3d9e002edd13b45ac506142a04bca425d1d12a7d2cb741df52aca68c7"
+      }
+    ],
+    "09_06_PERFORMANCE": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_06_PERFORMANCE_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\06.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "792ba1a97266b184cfdf01522cf85daf16b3b3ee42a24979b7d5798bdfb6425e"
+      }
+    ],
+    "09_07_REPEATABILITY": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_07_REPEATABILITY_01.png",
+        "source_type": "local",
+        "original_path": "E:\\code\\jiaozhun\\test_output\\_test_image_sources\\07.png",
+        "width": 1600,
+        "height": 900,
+        "sha256": "4eb729cb7c84507de772c31a6ad9a176452f8656459b2df19827f7951e9bc467"
+      }
+    ]
+  }
+}

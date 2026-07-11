@@ -196,7 +196,7 @@ def tc_is_writable(tc, overwrite_nonblank: bool = False) -> bool:
         return True
     if txt == '':
         return True
-    if txt in {'/', '／', '待填', '待填写', 'N/A', 'NA'}:
+    if txt in {'/', '／', '待填', '待填写', 'N/A'}:
         return True
     if normalize_text(txt) in {'是否', 'PASSFAIL', '通过不通过', '合格不合格', '■PASSFAIL', '□PASS□FAIL'}:
         return True

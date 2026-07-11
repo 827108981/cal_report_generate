@@ -65,6 +65,99 @@ def _contains(a: str, b: str) -> bool:
     return a in b or b in a
 
 
+def _canonical_row_label(text: str) -> str:
+    """Normalize business labels that differ between Excel and Word templates.
+
+    The BS-5000 workbook and Word template use several equivalent names, e.g.
+    "参考色素最大值" vs "参考色素均值" and "γ-GT" vs "GGT".  These
+    aliases must only affect row-key matching; the displayed Word labels remain
+    unchanged.
+    """
+    value = normalize_text(text)
+    if not value:
+        return ""
+    aliases = {
+        "ALTALTN": "ALT",
+        "Γ-GT": "GGT",
+        "ΓGT": "GGT",
+        "γ-GT": "GGT",
+        "γGT": "GGT",
+        "LDHL->P": "LDH",
+        "LDH(L->P)": "LDH",
+        "UREAUREAN": "UREA",
+        "TPTPN": "TP",
+        "TB-D": "TBD",
+        "T-BIL-V": "TBD",
+    }
+    if value in aliases:
+        return aliases[value]
+    if value.startswith("ALT") and "ALTN" in value:
+        return "ALT"
+    if value in {"Γ-GT", "ΓGT"} or "γ-GT" in text or "γGT" in text:
+        return "GGT"
+    if value.startswith("LDH"):
+        return "LDH"
+    if value.startswith("UREA"):
+        return "UREA"
+    if value.startswith("TP") and "TPT" in value:
+        return "TP"
+    # These labels describe the same row but express the threshold differently
+    # in the source workbook and the Word form.  Normalizing them here keeps
+    # the value offset anchored to the real Excel label instead of a fallback.
+    if value.startswith("\u6700\u5927\u5438\u5149\u5ea6"):
+        return "MAX_ABSORBANCE_THRESHOLD"
+    if "\u52a0\u6837\u8bef\u5dee" in value or "\u52a0\u6837\u51c6\u786e\u5ea6\u6307\u6807" in value:
+        return "SAMPLING_ACCURACY_INDICATOR"
+    if "参考色素" in value and ("均值" in value or "最大值" in value):
+        return "参考色素值"
+    if "携带污染率" in value and not any(x in value for x in ("CLH", "CHL", "指标", "不大于", "小于")):
+        return "携带污染率值"
+    return value
+
+
+def _block_kind_from_rows(rows: list[list[str]]) -> str:
+    flat = [normalize_text(cell) for row in rows for cell in row if cell]
+    joined = "|".join(flat)
+    first_cells = [normalize_text(row[0]) for row in rows if row and row[0]]
+    numeric_rows = sum(1 for value in first_cells if value.isdigit())
+
+    # 加样检测存在两种完全不同的方法：
+    # 1) 光度法：吸光度/结果；
+    # 2) 称重法：M0、M1、加样量。
+    # 两者虽然处于同一章节，但数据不能互相填充。
+    if all(token in joined for token in ("M0", "M1", "加样量")):
+        return "gravimetric_sampling"
+    if "吸光度" in joined and "结果" in joined and ("样本针" in joined or "试剂针" in joined):
+        return "photometric_sampling"
+
+    if all(token in joined for token in ("质控靶值", "实测值")) and ("范围低限" in joined or "范围高限" in joined):
+        return "clinical_accuracy"
+    if numeric_rows >= 10 and all(token in joined for token in ("MEAN", "SD", "CV")):
+        return "clinical_precision"
+    if "橙黄G样本针携带污染" in joined and "第1组" in joined:
+        return "sample_carryover"
+    return ""
+
+
+def _word_block_kind(word: WordTableBlock) -> str:
+    return _block_kind_from_rows(word.matrix)
+
+
+def _excel_block_kind(excel: ExcelBlock) -> str:
+    return _block_kind_from_rows([[cell.text for cell in row] for row in excel.rows])
+
+
+def _looks_like_tail_inventory_word_table(word: WordTableBlock) -> bool:
+    """Identify appendix-like reagent/consumable tables that must not fuzzy-match data blocks."""
+    head = normalize_text(" ".join(cell for row in word.matrix[:4] for cell in row if cell))
+    return any(token in head for token in (
+        "当前使用的校准溶液",
+        "校准品质控品名称",
+        "项目名称批号失效期",
+        "生产厂商失效期",
+    ))
+
+
 def _score_block(word: WordTableBlock, excel: ExcelBlock) -> float:
     score = 0.0
     ws = normalize_text(word.section)
@@ -73,6 +166,9 @@ def _score_block(word: WordTableBlock, excel: ExcelBlock) -> float:
     eo = normalize_text(excel.object_name)
     wt = normalize_text(word.title)
     et = normalize_text(excel.title)
+    section_related = bool(ws and es and _contains(ws, es))
+    object_related = bool(wo and eo and _contains(wo, eo))
+    title_related = bool(wt and et and _contains(wt, et))
 
     if ws and es:
         if ws == es:
@@ -91,10 +187,34 @@ def _score_block(word: WordTableBlock, excel: ExcelBlock) -> float:
         elif _contains(wt, et):
             score += 14
     # 表头相似度作为兜底
-    score += safe_ratio(word.header_norms, excel.header_norms) * 30
+    header_ratio = safe_ratio(word.header_norms, excel.header_norms)
+    score += header_ratio * 30
+
+    # 大型 Word 表不能匹配到只有一行说明文字的 Excel 锚点。
+    if len(word.matrix) >= 4 and len(excel.rows) <= 1:
+        score -= 100
+
+    # 对临床精密度/准确性、样本携带污染率等结构相近但标题重复的区域，
+    # 以表格结构作为强信号，避免仅凭章节名选中错误说明块。
+    word_kind = _word_block_kind(word)
+    excel_kind = _excel_block_kind(excel)
+    if word_kind and excel_kind:
+        score += 120 if word_kind == excel_kind else -100
+
+    # 有些尾部清单表只有章节名与前面的检测表相同，本身没有可核对的数据表头。
+    # 这种“章节名单点命中”不能跨表借数据，否则会把电解质准确度等数据写进失效期/批号表。
+    if (
+        section_related
+        and not object_related
+        and not title_related
+        and header_ratio == 0
+        and not (word_kind and excel_kind)
+        and _looks_like_tail_inventory_word_table(word)
+    ):
+        score = min(score, 20)
 
     # 如果完全无章节或对象匹配，只靠表头不允许高分
-    if not ((_contains(ws, es) and ws and es) or (_contains(wo, eo) and wo and eo) or (_contains(wt, et) and wt and et)):
+    if not (section_related or object_related or title_related):
         score = min(score, 20)
     return score
 
@@ -114,6 +234,55 @@ def _choose_block(word: WordTableBlock, blocks: list[ExcelBlock], module: str) -
     if best is None or best_score < 55:
         return None, best_score
     return best, best_score
+
+
+def _exact_named_block(
+    blocks: list[ExcelBlock],
+    module: str,
+    section_name: str,
+    block_name: str,
+) -> Optional[ExcelBlock]:
+    """Return one exact Excel sub-block without fuzzy fallback.
+
+    Some Word tables contain two independent result regions in one physical table.
+    BS-5000 dark-current detection is one such case: the Word table contains both
+    inner-ring and outer-ring regions, while Excel stores them as two separate
+    blocks.  Fuzzy selection of a single block inevitably leaves one region empty
+    or duplicates the other.  This helper deliberately uses exact section/name
+    matching so the local fix cannot affect unrelated sections.
+    """
+    expected_section = normalize_text(section_name)
+    expected_name = normalize_text(block_name)
+    for block in blocks:
+        if block.module != module:
+            continue
+        if normalize_text(block.section) != expected_section:
+            continue
+        names = {normalize_text(block.title), normalize_text(block.object_name)}
+        if expected_name in names:
+            return block
+    return None
+
+
+def _dark_current_split_sources(
+    word: WordTableBlock,
+    blocks: list[ExcelBlock],
+    module: str,
+) -> tuple[Optional[ExcelBlock], Optional[ExcelBlock]] | None:
+    """Resolve the two Excel sources for the combined BS-5000 dark-current table.
+
+    The template uses one Word table with two regions (inner/outer), but the Excel
+    reader emits two independent blocks.  Handle only this exact shape and leave
+    the generic matcher unchanged for every other report section.
+    """
+    if normalize_text(word.section) != normalize_text("暗电流检测"):
+        return None
+    joined = normalize_text(" ".join(cell for row in word.matrix for cell in row if cell))
+    if normalize_text("内圈暗电流测试") not in joined or normalize_text("外圈暗电流测试") not in joined:
+        return None
+    inner = _exact_named_block(blocks, module, "暗电流检测", "内圈暗电流测试")
+    outer = _exact_named_block(blocks, module, "暗电流检测", "外圈暗电流测试")
+    return inner, outer
 
 
 def _source_row_texts(row: list[SourceCell]) -> list[str]:
@@ -141,7 +310,7 @@ HIGH_LEVEL_ROW_LABELS = {'测试数据', '准确性计算', '重复性计算', '
 
 def _is_placeholder_text(t: str) -> bool:
     n = normalize_text(t)
-    return n in {'', '/', '／', '是否', 'PASS', 'FAIL', '■PASS', '■FAIL', 'PASSFAIL', '■PASSFAIL', '□PASS□FAIL', '通过不通过', '合格不合格', 'NA', 'N/A'}
+    return n in {'', '/', '／', '是否', 'PASS', 'FAIL', '■PASS', '■FAIL', 'PASSFAIL', '■PASSFAIL', '□PASS□FAIL', '通过不通过', '合格不合格', 'N/A'}
 
 def _row_key_candidates(texts: list[str]) -> list[str]:
     """从 Word 行中抽取行键：优先数字/编号，其次 MAX/MIN/CV/结论等。"""
@@ -163,102 +332,106 @@ def _row_key_candidates(texts: list[str]) -> list[str]:
     return keys
 
 
-def _business_key(text: str) -> str:
-    n = normalize_text(text).replace('ΓGT', 'GGT').replace('Γ', 'G')
-    if '加样误差' in n or '加样准确度指标' in n:
-        return '加样准确度指标'
-    for root in ['ALT', 'GGT', 'LDH', 'TG', 'UREA', 'TP', 'TBD', 'NA', 'CL']:
-        if n == root or n.startswith(root):
-            return root
-    if n in {'CA', 'K', 'P'}:
-        return n
-    return n
+def _row_group_marker(texts: list[str]) -> str:
+    """Return the local subgroup used to disambiguate duplicate row labels."""
+    joined = normalize_text(" ".join(texts))
+    if "水平1" in joined:
+        return "LEVEL1"
+    if "水平2" in joined:
+        return "LEVEL2"
+    # Check outer before inner only for clarity; normalized Chinese does not overlap.
+    if "外圈" in joined:
+        return "OUTER"
+    if "内圈" in joined:
+        return "INNER"
+    return ""
 
 
-def _key_matches(key: str, source_norm: str) -> bool:
-    if key == source_norm:
+def _source_group_map(excel_rows: list[list[SourceCell]]) -> list[str]:
+    groups: list[str] = []
+    current = ""
+    for row in excel_rows:
+        marker = _row_group_marker(_source_row_texts(row))
+        if marker:
+            current = marker
+        groups.append(current)
+    return groups
+
+
+def _labels_equivalent(left: str, right: str) -> bool:
+    a = _canonical_row_label(left)
+    b = _canonical_row_label(right)
+    if not a or not b:
+        return False
+    if a == b:
         return True
-    if _business_key(key) == _business_key(source_norm) and _business_key(key):
-        return True
-    for root in [
-        '最大吸光度', '相对偏倚', '准确性计算', '重复性计算', '稳定性计算', '结论',
-        '波动百分比', '参考色素', '携带污染率', '橙黄G样本针携带污染', '判定要求',
-        '判定标准CV', '判定标准SD', '判定标准XOVER',
-    ]:
-        nr = normalize_text(root)
-        if nr and nr in key and nr in source_norm:
-            return True
-    return False
+    return len(a) >= 4 and len(b) >= 4 and (a in b or b in a)
 
 
-def _strict_first_key_matches(key: str, source_norm: str) -> bool:
-    if key == source_norm:
-        return True
-    bk = _business_key(key)
-    bs = _business_key(source_norm)
-    return bk == bs and bk in {'ALT', 'GGT', 'LDH', 'TG', 'UREA', 'TP', 'TBD', 'NA', 'CL', 'CA', 'K', 'P'}
+def _labels_match_as_row_key(word_label: str, source_label: str) -> bool:
+    """Match a row label without treating a narrative title as a data row."""
+    if not _labels_equivalent(word_label, source_label):
+        return False
+    word_key = _canonical_row_label(word_label)
+    source_key = _canonical_row_label(source_label)
+    return word_key == source_key or normalize_text(source_label).startswith(normalize_text(word_label))
 
 
-def _find_source_row(word_row_texts: list[str], excel_rows: list[list[SourceCell]], start_index: int = 0) -> tuple[Optional[list[SourceCell]], int]:
+def _find_source_row(
+    word_row_texts: list[str],
+    excel_rows: list[list[SourceCell]],
+    required_group: str = "",
+    source_groups: list[str] | None = None,
+) -> tuple[Optional[list[SourceCell]], int]:
     word_nonblank = [t for t in word_row_texts if not is_blank_value(t) and not _is_placeholder_text(t)]
     if not word_nonblank:
         return None, -1
     keys = _row_key_candidates(word_nonblank)
     if not keys:
         return None, -1
+    groups = source_groups or [""] * len(excel_rows)
 
-    # 第一优先级：用 Word 当前行第一个非空内容作为行键，要求匹配 Excel 行第一个非空内容。
-    # 这样可以避免线性表中 Word 行“1 | 100 | 空...”误匹配到 Excel 表头行“1 | 2 | 3”。
-    primary = normalize_text(word_nonblank[0])
-    if primary:
-        for idx, srow in enumerate(excel_rows):
-            if idx < start_index:
-                continue
-            stexts = _source_row_texts(srow)
-            if len(stexts) < 2:
-                continue
-            first_norm = normalize_text(stexts[0])
-            protected_first_labels = {'项目', '测试项目', '测定项目', '单位', 'X轴', '通道', '校准位置参数', '指标', '要求', '判定要求'}
-            if first_norm in protected_first_labels and first_norm != primary:
-                continue
-            if _strict_first_key_matches(primary, first_norm):
-                # 纯数字行键时，只跳过 Excel 的二层数字表头（如 1/2/3），
-                # 不再要求行键必须在 Excel 第一列，否则吸光度重复性/稳定性等真实数据行会被误排除。
-                if primary.isdigit() and _looks_like_numeric_header_source_row(srow):
-                    continue
-                return srow, idx
-            for root in ['最大吸光度', '相对偏倚', '准确性计算', '重复性计算', '稳定性计算', '结论', '波动百分比']:
-                if root in primary and root in first_norm:
-                    return srow, idx
+    def group_ok(index: int) -> bool:
+        return not required_group or index >= len(groups) or groups[index] == required_group
 
-    # 第二优先级：兼容少数行键不在第一列的表格。
+    # 第一优先级：用 Word 当前行第一个非空内容作为行键。
+    primary = word_nonblank[0]
+    primary_norm = normalize_text(primary)
     for idx, srow in enumerate(excel_rows):
-        if idx < start_index:
+        if not group_ok(idx):
             continue
-        if len(srow) < 2:
+        stexts = _source_row_texts(srow)
+        if len(stexts) < 1:
+            continue
+        first_text = stexts[0]
+        first_norm = normalize_text(first_text)
+        if _labels_match_as_row_key(primary, first_text):
+            if primary_norm.isdigit() and _looks_like_numeric_header_source_row(srow):
+                continue
+            return srow, idx
+        for root in ['最大吸光度', '相对偏倚', '准确性计算', '重复性计算', '稳定性计算', '结论', '指标', '波动百分比']:
+            if root in primary_norm and first_norm.startswith(root):
+                return srow, idx
+
+    # 第二优先级：兼容行键不在 Excel 第一列，以及 Word 左侧存在纵向合并组名。
+    for idx, srow in enumerate(excel_rows):
+        if not group_ok(idx) or len(srow) < 1:
             continue
         stexts = _source_row_texts(srow)
         snorms = [normalize_text(t) for t in stexts]
-        first_norm = snorms[0] if snorms else ''
-        protected_first_labels = {'项目', '测试项目', '测定项目', '单位', 'X轴', '通道', '校准位置参数', '指标', '要求', '判定要求'}
-        if first_norm in protected_first_labels and first_norm not in keys:
-            continue
         scombo2 = normalize_text(''.join(stexts[:2])) if len(stexts) >= 2 else ''
         for key in keys:
             if not key:
                 continue
             if key == scombo2:
                 return srow, idx
-            # 数字行键允许出现在 Excel 非第一列（例如吸光度稳定性检测第24行，Excel第一列是纵向合并标签“测试数据”，采光周期在第4列）。
-            # 但必须排除真正的二层数字表头（如 1/2/3），防止线性范围表误匹配表头。
             if key.isdigit() and key in snorms and not _looks_like_numeric_header_source_row(srow):
                 return srow, idx
-            # 非数字键仍不做过度宽松匹配，只允许较长文本/业务根词匹配。
-            for sn in snorms:
-                if _key_matches(key, sn):
+            for source_text, source_norm in zip(stexts, snorms):
+                if _labels_match_as_row_key(key, source_text):
                     return srow, idx
-                for root in ['最大吸光度', '相对偏倚', '准确性计算', '重复性计算', '稳定性计算', '结论', '波动百分比']:
-                    if root in key and root in sn:
+                for root in ['最大吸光度', '相对偏倚', '准确性计算', '重复性计算', '稳定性计算', '结论', '指标', '波动百分比']:
+                    if root in key and source_norm.startswith(root):
                         return srow, idx
     return None, -1
 
@@ -283,8 +456,11 @@ def _source_data_after_key(word_row_texts: list[str], source_row: list[SourceCel
     if key_norm in snorms:
         pos = snorms.index(key_norm)
         return source_row[pos + 1:]
-    for pos, sn in enumerate(snorms):
-        if _key_matches(key_norm, sn):
+    # Excel 与 Word 可能使用等价业务名称，例如“参考色素最大值/均值”、
+    # “ALT(ALTn)/ALT”。按别名找到真实标签位置后再取右侧数据，
+    # 避免把标签本身误写入 Word。
+    for pos, source_text in enumerate(stexts):
+        if _labels_equivalent(key_text, source_text):
             return source_row[pos + 1:]
     # 尝试前两个组合，例如 稳定性计算MAX
     if len(word_nonblank) >= 2:
@@ -328,15 +504,23 @@ def _word_empty_tcs_after_key(table, row_index: int, overwrite_nonblank: bool) -
 
 def _looks_like_header_row(texts: list[str]) -> bool:
     joined = ' '.join(t for t in texts if t)
-    nonblank = [t.strip() for t in texts if t and t.strip()]
-    if nonblank:
-        first_norm = normalize_text(nonblank[0])
-        if first_norm in {'项目', '项目次数', '项目测试时间', '项目交叉污染', '测试项目', '测定项目', 'X轴', '通道', '校准位置参数'}:
-            return True
-    keywords = ['次数', '采光周期', '检测项目', '校准位置参数', '要求', '吸光度', '结果', '温度值']
+    keywords = [
+        '次数', '采光周期', '检测项目', '测试项目', '校准位置参数', '要求',
+        '吸光度', '结果', '温度值', '单位', '质控靶值', '范围低限',
+        '范围高限', '实测值', '是否在控',
+    ]
     if sum(1 for k in keywords if k in joined) >= 2 and not any(t.strip().isdigit() for t in texts if t.strip()):
         return True
+    if '测试描述' in joined and sum(1 for t in texts if str(t).strip().startswith('第') and str(t).strip().endswith('组')) >= 2:
+        return True
+    normalized_cells = {normalize_text(t) for t in texts if t and str(t).strip()}
+    if any('项目交叉污染' in normalize_text(t) for t in texts if t) and {'NA', 'K', 'CL'} & normalized_cells:
+        return True
+    first_norm = normalize_text(texts[0]) if texts else ''
+    if first_norm in {'项目', '项目次数', '项目测试时间'} and {'NA', 'K', 'CL'} & normalized_cells:
+        return True
     # 线性范围表的第二层表头：前两列空白，后面是 1/2/3，不能当作数据行。
+    nonblank = [t.strip() for t in texts if t and t.strip()]
     if len(texts) >= 5 and (not texts[0].strip()) and (not texts[1].strip()) and nonblank and all(x.isdigit() for x in nonblank):
         return True
     return False
@@ -362,6 +546,103 @@ def _font_size_for_word_table(word: WordTableBlock) -> float:
 
 
 
+def _excel_block_has_raw_measurement_data(excel: ExcelBlock) -> bool:
+    """Return True only when a source block has real measured inputs, not just targets/formulas."""
+    object_key = normalize_text(excel.object_name + excel.title)
+    for row in excel.rows:
+        if not row:
+            continue
+        if _looks_like_numeric_header_source_row(row):
+            continue
+        label = normalize_text(row[0].text)
+        raw_values = [cell for cell in row[1:] if not cell.is_formula and not is_blank_value(cell.value)]
+        if not raw_values:
+            continue
+
+        # Linear tables always contain X/target values. They are not enough to
+        # calculate averages, deviations, R/R² or conclusions without measured values.
+        if "线性范围验证" in object_key and label.isdigit():
+            if any(cell.col >= 5 for cell in raw_values):
+                return True
+            continue
+
+        if any(token in label for token in (
+            "电流", "吸光度", "实测", "测定值", "测量值",
+            "样本针携带污染",
+        )):
+            return True
+        if label.isdigit() or label in {"M1", "M2", "M3", "0H", "4H", "8H"} or label.startswith("实测"):
+            return True
+    return False
+
+
+def _clear_cell_for_no_source(
+    word: WordTableBlock,
+    module: str,
+    logs: list[FillLog],
+    row_index: int,
+    col_index: int,
+    tc,
+    font_size: float,
+    reason: str,
+) -> None:
+    if not tc_text(tc).strip():
+        return
+    set_tc_text_keep_style(tc, "", font_size_pt=font_size)
+    logs.append(FillLog(
+        word_table_index=word.index,
+        word_section=word.section,
+        word_object=word.object_name,
+        word_row=row_index + 1,
+        word_col=col_index + 1,
+        module=module,
+        excel_sheet="",
+        excel_section="",
+        excel_object="",
+        excel_row=0,
+        excel_col=0,
+        value="",
+        reason=reason,
+    ))
+
+
+def _clear_empty_source_derived_values(word: WordTableBlock, excel: ExcelBlock, font_size: float) -> list[FillLog]:
+    """Clear formula/template-derived values when the matched source has no measurements."""
+    if _excel_block_has_raw_measurement_data(excel):
+        return []
+
+    logs: list[FillLog] = []
+    derived_labels = {
+        "结论", "B1%", "B2%", "B3%", "MEAN", "SD", "CV", "XMAX", "XMIN",
+        "波动百分比", "携带污染率CLH", "携带污染率CHL",
+    }
+    for r_idx, row in enumerate(physical_table_matrix(word.table)):
+        if not row:
+            continue
+        norms = [normalize_text(cell) for cell in row]
+        joined = normalize_text(" ".join(row))
+        tcs = row_physical_tcs(word.table, r_idx)
+        reason = "源块无实测数据，清理模板/公式派生结果"
+
+        if "统计" in joined or "验证结论" in joined:
+            for col_idx, tc in enumerate(tcs):
+                _clear_cell_for_no_source(word, excel.module, logs, r_idx, col_idx, tc, font_size, reason)
+            continue
+
+        first = norms[0]
+        if first in derived_labels:
+            for col_idx in range(1, len(tcs)):
+                _clear_cell_for_no_source(word, excel.module, logs, r_idx, col_idx, tcs[col_idx], font_size, reason)
+            continue
+
+        # R²/R/a/b rows in the template use bare "R/a/b" placeholders as value cells.
+        if {"R", "A", "B"} & set(norms):
+            for col_idx, norm in enumerate(norms):
+                if norm in {"R", "A", "B"} and col_idx < len(tcs):
+                    _clear_cell_for_no_source(word, excel.module, logs, r_idx, col_idx, tcs[col_idx], font_size, reason)
+    return logs
+
+
 def _next_writable_after_label(table, row_index: int, label_col: int, next_label_col: int | None, overwrite_nonblank: bool):
     """在同一行内，找某个标签右侧、下一个标签左侧的第一个可写单元格。"""
     tcs = row_physical_tcs(table, row_index)
@@ -372,7 +653,7 @@ def _next_writable_after_label(table, row_index: int, label_col: int, next_label
     return None
 
 
-def _fill_label_value_pairs(word: WordTableBlock, excel: ExcelBlock, r_idx: int, row_texts: list[str], source_row: list[SourceCell], raw_only: bool, overwrite_nonblank: bool, font_size: float) -> list[FillLog]:
+def _fill_label_value_pairs(word: WordTableBlock, excel: ExcelBlock, r_idx: int, row_texts: list[str], source_row: list[SourceCell], raw_only: bool, overwrite_nonblank: bool, font_size: float, allow_formula_values: bool) -> list[FillLog]:
     """处理一行多个“标签-值”对，例如 R²/R/a/b。普通按行键连续填充会只填最后一个标签后面的值。"""
     label_roots = ['R²', 'R', 'A', 'B']
     positions = [(i, t.strip()) for i, t in enumerate(row_texts) if t and t.strip() and not _is_placeholder_text(t)]
@@ -403,7 +684,7 @@ def _fill_label_value_pairs(word: WordTableBlock, excel: ExcelBlock, r_idx: int,
         src = None
         for sj in range(src_label_idx + 1, len(source_row)):
             cand = source_row[sj]
-            if raw_only and cand.is_formula:
+            if cand.is_formula and (raw_only or not allow_formula_values):
                 continue
             if not is_blank_value(cand.value):
                 src = cand
@@ -429,194 +710,142 @@ def _fill_label_value_pairs(word: WordTableBlock, excel: ExcelBlock, r_idx: int,
         ))
     return logs
 
-
-def _row_tracking_key(row_texts: list[str]) -> str:
-    clean = [t.strip() for t in row_texts if t and t.strip() and not _is_placeholder_text(t)]
-    if not clean:
-        return ''
-    if normalize_text(clean[0]) in HIGH_LEVEL_ROW_LABELS and len(clean) >= 2:
-        return normalize_text(clean[-1])
-    return normalize_text(clean[0])
-
-
-def _candidate_blocks_for_fill(word: WordTableBlock, blocks: list[ExcelBlock], module: str, primary: ExcelBlock | None) -> list[ExcelBlock]:
-    word_identity = normalize_text(word.section + word.title + word.object_name + ''.join(''.join(row) for row in word.matrix[:2]))
-    allow_section_expansion = any(key in word_identity for key in [
-        normalize_text('主机位置校准'),
-        normalize_text('暗电流检测'),
-        normalize_text('样本携带污染率检测'),
-        normalize_text('临床测试精密度及准确性'),
-    ])
-    if not allow_section_expansion:
-        return [primary] if primary is not None else []
-
-    ws = normalize_text(word.section)
-    candidates: list[ExcelBlock] = []
-    for block in blocks:
-        if block.module != module:
-            continue
-        es = normalize_text(block.section)
-        if primary is block or (ws and es and _contains(ws, es)):
-            candidates.append(block)
-    if primary is not None and primary not in candidates:
-        candidates.append(primary)
-    if not candidates:
-        return [primary] if primary is not None else []
-    seen: set[tuple[str, int, int, str]] = set()
-    unique: list[ExcelBlock] = []
-    for block in candidates:
-        key = (block.sheet, block.start_row, block.end_row, block.module)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(block)
-    return sorted(unique, key=lambda block: _score_block(word, block), reverse=True)
+def _canonical_header_name(text: str) -> str:
+    value = normalize_text(text)
+    if value in {"测试项目", "测定项目", "项目"}:
+        return "ITEM"
+    if "单位" in value and "次数" not in value:
+        return "UNIT"
+    if "质控靶值" in value or value == "靶值":
+        return "TARGET"
+    if "范围低限" in value or "下限" == value:
+        return "LOW"
+    if "范围高限" in value or "上限" == value:
+        return "HIGH"
+    if "实测值" in value or value == "测量值":
+        return "MEASURED"
+    if "是否在控" in value or "是否通过" in value or value == "结论":
+        return "STATUS"
+    return ""
 
 
-def _choose_source_for_row(
+def _word_accuracy_header_map(matrix: list[list[str]], row_index: int) -> dict[str, int]:
+    for rr in range(row_index - 1, max(-1, row_index - 12), -1):
+        mapping: dict[str, int] = {}
+        for ci, text in enumerate(matrix[rr]):
+            name = _canonical_header_name(text)
+            if name:
+                mapping[name] = ci
+        if {"ITEM", "UNIT", "LOW", "HIGH", "MEASURED", "STATUS"}.issubset(mapping):
+            return mapping
+    return {}
+
+
+def _excel_accuracy_header_map(excel: ExcelBlock, source_index: int) -> dict[str, int]:
+    for rr in range(source_index - 1, max(-1, source_index - 12), -1):
+        mapping: dict[str, int] = {}
+        for cell in excel.rows[rr]:
+            name = _canonical_header_name(cell.text)
+            if name:
+                mapping[name] = cell.col
+        if {"ITEM", "UNIT", "LOW", "HIGH", "MEASURED", "STATUS"}.issubset(mapping):
+            return mapping
+    return {}
+
+
+def _fill_clinical_accuracy_row(
     word: WordTableBlock,
-    row_texts: list[str],
-    candidates: list[ExcelBlock],
-    used_rows: dict[tuple[int, str], int],
-) -> tuple[ExcelBlock | None, list[SourceCell] | None, int]:
-    tracking_key = _row_tracking_key(row_texts)
-    best_block: ExcelBlock | None = None
-    best_row: list[SourceCell] | None = None
-    best_index = -1
-    best_score = -1.0
-    for order, block in enumerate(candidates):
-        start_index = used_rows.get((id(block), tracking_key), -1) + 1 if tracking_key else 0
-        source_row, source_index = _find_source_row(row_texts, block.rows, start_index=start_index)
-        if source_row is None:
-            continue
-        score = _score_block(word, block) - (order * 0.01)
-        if source_index >= start_index:
-            score += 4
-        if score > best_score:
-            best_block = block
-            best_row = source_row
-            best_index = source_index
-            best_score = score
-    if best_block is not None and tracking_key and best_index >= 0:
-        used_rows[(id(best_block), tracking_key)] = best_index
-    return best_block, best_row, best_index
+    excel: ExcelBlock,
+    matrix: list[list[str]],
+    row_index: int,
+    source_row: list[SourceCell],
+    source_index: int,
+    raw_only: bool,
+    overwrite_nonblank: bool,
+    font_size: float,
+) -> list[FillLog]:
+    word_map = _word_accuracy_header_map(matrix, row_index)
+    excel_map = _excel_accuracy_header_map(excel, source_index)
+    if not word_map or not excel_map:
+        return []
+    source_by_col = {cell.col: cell for cell in source_row}
 
-
-def _sync_label_from_source(word, r_idx: int, row_texts: list[str], source_row: list[SourceCell], font_size: float) -> None:
-    if not row_texts or not source_row:
-        return
-    word_label = (row_texts[0] or '').strip()
-    source_label = (source_row[0].text or '').strip()
-    if not word_label or not source_label:
-        return
-    if normalize_text(word_label) == normalize_text(source_label):
-        return
-    roots = ['最大吸光度', '相对偏倚', '参考色素', '携带污染率']
-    if not any(normalize_text(root) in normalize_text(word_label) and normalize_text(root) in normalize_text(source_label) for root in roots):
-        return
-    tcs = row_physical_tcs(word.table, r_idx)
-    if tcs:
-        set_tc_text_keep_style(tcs[0], source_label, font_size_pt=font_size)
-
-
-def _looks_like_clinical_accuracy_table(word: WordTableBlock) -> bool:
-    if normalize_text(word.section) != normalize_text('临床测试精密度及准确性'):
-        return False
-    joined = normalize_text(''.join(''.join(row) for row in word.matrix[:4]))
-    return '测试项目' in joined and '质控靶值' in joined and '是否在控' in joined
-
-
-def _clinical_source_block(candidates: list[ExcelBlock]) -> ExcelBlock | None:
-    for block in candidates:
-        text = normalize_text(''.join(c.text for row in block.rows for c in row))
-        if '测试项目' in text and '是否在控' in text:
-            return block
-    return None
-
-
-def _fill_clinical_accuracy_table(word: WordTableBlock, candidates: list[ExcelBlock], overwrite_nonblank: bool, font_size: float) -> list[FillLog] | None:
-    if not _looks_like_clinical_accuracy_table(word):
-        return None
-    excel = _clinical_source_block(candidates)
-    if excel is None:
+    # 临床准确性必须有真实的“质控靶值”来源。
+    # 当前 BS-5000 示例 Excel 中靶值为空，而低限/高限/是否在控是依赖靶值的公式。
+    # 旧逻辑会把公式缓存中的 0/Fail 当成有效数据写入 Word，造成“无数据却自动生成”。
+    # 这里严格执行：靶值为空时整行不填，单位、实测值和公式结果也不拼凑。
+    target_source_col = excel_map.get("TARGET")
+    target_source = source_by_col.get(target_source_col) if target_source_col is not None else None
+    if target_source is None or is_blank_value(target_source.value):
         return []
 
-    rows_by_key: dict[str, list[list[SourceCell]]] = {}
-    for row in excel.rows:
-        if not row:
-            continue
-        key = _business_key(normalize_text(row[0].text))
-        if key in {'ALT', 'GGT', 'LDH', 'TG', 'UREA', 'TP', 'TBD', 'NA', 'CL', 'CA', 'K', 'P'}:
-            rows_by_key.setdefault(key, []).append(row)
-
-    used: dict[str, int] = {}
+    tcs = row_physical_tcs(word.table, row_index)
     logs: list[FillLog] = []
-    source_cols = [3, 5, 8, 11, 13, 15]
-    for r_idx, row_texts in enumerate(physical_table_matrix(word.table)):
-        if not row_texts:
+    for name in ("UNIT", "TARGET", "LOW", "HIGH", "MEASURED", "STATUS"):
+        target_col = word_map.get(name)
+        source_col = excel_map.get(name)
+        if target_col is None or source_col is None or target_col >= len(tcs):
             continue
-        project = row_texts[0].strip()
-        key = _business_key(normalize_text(project))
-        available = rows_by_key.get(key)
-        if not available:
+        source = source_by_col.get(source_col)
+        if source is None or is_blank_value(source.value):
             continue
-        item_index = used.get(key, 0)
-        if item_index >= len(available):
+        if raw_only and source.is_formula:
             continue
-        used[key] = item_index + 1
-        source_row = available[item_index]
-        by_col = {cell.col: cell for cell in source_row}
-        tcs = row_physical_tcs(word.table, r_idx)
-        for offset, source_col in enumerate(source_cols, start=1):
-            if offset >= len(tcs):
-                break
-            source = by_col.get(source_col)
-            if source is None or is_blank_value(source.value):
-                continue
-            if not tc_is_writable(tcs[offset], overwrite_nonblank):
-                continue
-            set_tc_text_keep_style(tcs[offset], source.text, font_size_pt=font_size)
-            logs.append(FillLog(
-                word_table_index=word.index,
-                word_section=word.section,
-                word_object=word.object_name,
-                word_row=r_idx + 1,
-                word_col=offset + 1,
-                module=excel.module,
-                excel_sheet=excel.sheet,
-                excel_section=excel.section,
-                excel_object=excel.object_name,
-                excel_row=source.row,
-                excel_col=source.col,
-                value=source.text,
-                reason='临床准确性表按原始列映射填充',
-            ))
+        tc = tcs[target_col]
+        if not tc_is_writable(tc, overwrite_nonblank):
+            continue
+        set_tc_text_keep_style(tc, source.text, font_size_pt=font_size)
+        logs.append(FillLog(
+            word_table_index=word.index,
+            word_section=word.section,
+            word_object=word.object_name,
+            word_row=row_index + 1,
+            word_col=target_col + 1,
+            module=excel.module,
+            excel_sheet=excel.sheet,
+            excel_section=excel.section,
+            excel_object=excel.object_name,
+            excel_row=source.row,
+            excel_col=source.col,
+            value=source.text,
+            reason='临床准确性按表头字段精确填充',
+        ))
     return logs
 
 
 def _fill_table_from_block(word: WordTableBlock, excel: ExcelBlock, raw_only: bool, overwrite_nonblank: bool) -> list[FillLog]:
-    return _fill_table_from_blocks(word, [excel], raw_only=raw_only, overwrite_nonblank=overwrite_nonblank)
-
-
-def _fill_table_from_blocks(word: WordTableBlock, candidates: list[ExcelBlock], raw_only: bool, overwrite_nonblank: bool) -> list[FillLog]:
     logs: list[FillLog] = []
     matrix = physical_table_matrix(word.table)
     font_size = _font_size_for_word_table(word)
-    clinical_logs = _fill_clinical_accuracy_table(word, candidates, overwrite_nonblank, font_size)
-    if clinical_logs is not None:
-        return clinical_logs
-    used_rows: dict[tuple[int, str], int] = {}
+    source_groups = _source_group_map(excel.rows)
+    has_raw_measurements = _excel_block_has_raw_measurement_data(excel)
+    current_word_group = ""
     for r_idx, row_texts in enumerate(matrix):
-        if r_idx == 0 and len(compact_texts(row_texts)) == 1:
-            continue
+        marker = _row_group_marker(row_texts)
+        if marker:
+            current_word_group = marker
         if _looks_like_header_row(row_texts):
             continue
-        excel, source_row, src_index = _choose_source_for_row(word, row_texts, candidates, used_rows)
-        if excel is None or source_row is None:
+        source_row, src_index = _find_source_row(
+            row_texts,
+            excel.rows,
+            required_group=current_word_group,
+            source_groups=source_groups,
+        )
+        if source_row is None:
             continue
-        _sync_label_from_source(word, r_idx, row_texts, source_row, font_size)
+        if _word_block_kind(word) == "clinical_accuracy" and _excel_block_kind(excel) == "clinical_accuracy":
+            accuracy_logs = _fill_clinical_accuracy_row(
+                word, excel, matrix, r_idx, source_row, src_index, raw_only, overwrite_nonblank, font_size
+            )
+            logs.extend(accuracy_logs)
+            # 临床准确性由专用表头映射独占处理。即使因靶值缺失而没有写入，
+            # 也不能再退回普通连续填充，否则仍会把单位/0/Fail 错填进去。
+            continue
         # 先处理 R²/R/a/b 这类一行多个标签-值对。
-        pair_logs = _fill_label_value_pairs(word, excel, r_idx, row_texts, source_row, raw_only, overwrite_nonblank, font_size)
+        pair_logs = _fill_label_value_pairs(
+            word, excel, r_idx, row_texts, source_row, raw_only, overwrite_nonblank, font_size, has_raw_measurements
+        )
         if pair_logs:
             logs.extend(pair_logs)
             continue
@@ -629,7 +858,7 @@ def _fill_table_from_blocks(word: WordTableBlock, candidates: list[ExcelBlock], 
         fill_i = 0
         for target_col, tc in target_cells:
             # 跳过公式源单元格：Word 有公式时只填原始数据；Word 无公式时才同步 Excel 结果
-            while fill_i < len(src_values) and (raw_only and src_values[fill_i].is_formula):
+            while fill_i < len(src_values) and (src_values[fill_i].is_formula and (raw_only or not has_raw_measurements)):
                 fill_i += 1
             if fill_i >= len(src_values):
                 break
@@ -653,6 +882,47 @@ def _fill_table_from_blocks(word: WordTableBlock, candidates: list[ExcelBlock], 
                 value=src.text,
                 reason='章节+名称+表头匹配后按行键复制',
             ))
+    logs.extend(_clear_empty_source_derived_values(word, excel, font_size))
+    return logs
+
+
+def _clear_unmatched_template_values(word: WordTableBlock, module: str) -> list[FillLog]:
+    """Clear stale template result text for tables that have no trusted Excel source."""
+    if _word_block_kind(word) != "gravimetric_sampling":
+        return []
+
+    logs: list[FillLog] = []
+    font_size = _font_size_for_word_table(word)
+    matrix = physical_table_matrix(word.table)
+    for r_idx, row in enumerate(matrix):
+        first = normalize_text(row[0]) if row else ""
+        second = normalize_text(row[1]) if len(row) > 1 else ""
+        joined = normalize_text(" ".join(row))
+        if first != "结论" and not (second in {"正确度", "重复性"} and "符合要求" in joined):
+            continue
+
+        tcs = row_physical_tcs(word.table, r_idx)
+        # Preserve the row labels ("结论/正确度/重复性") but remove template verdicts.
+        for col_idx in range(2, len(tcs)):
+            old_text = tc_text(tcs[col_idx]).strip()
+            if not old_text:
+                continue
+            set_tc_text_keep_style(tcs[col_idx], "", font_size_pt=font_size)
+            logs.append(FillLog(
+                word_table_index=word.index,
+                word_section=word.section,
+                word_object=word.object_name,
+                word_row=r_idx + 1,
+                word_col=col_idx + 1,
+                module=module,
+                excel_sheet="",
+                excel_section="",
+                excel_object="",
+                excel_row=0,
+                excel_col=0,
+                value="",
+                reason="无可信数据源，清理模板预置结果",
+            ))
     return logs
 
 
@@ -671,13 +941,6 @@ def _infer_module_for_table(word: WordTableBlock, occurrence_by_key: dict[str, i
     count = occurrence_by_key.get(key, 0)
     occurrence_by_key[key] = count + 1
     return 'M1' if count % 2 == 0 else 'M2'
-
-
-def _has_explicit_module_hint(word: WordTableBlock) -> bool:
-    if getattr(word, 'module_hint', ''):
-        return True
-    text = normalize_text(word.key_text)
-    return ('M2' in text and 'M1' not in text) or ('M1' in text and 'M2' not in text)
 
 
 
@@ -758,21 +1021,54 @@ def fill_report_tables(
         warnings.append(f'已删除顶层六、七、八、九章节相关正文块：{removed_tail_blocks} 个。')
     _prepare_tables_for_fixed_fill(doc)
     word_blocks = get_word_table_blocks(doc)
-    has_m2 = any(b.module == 'M2' for b in excel_blocks)
+    has_m2 = any(block.module == 'M2' for block in excel_blocks)
     occurrence_by_key: dict[str, int] = {}
     fill_logs: list[FillLog] = []
     match_logs: list[MatchLog] = []
 
     for wb in word_blocks:
         module = _infer_module_for_table(wb, occurrence_by_key, has_m2)
+
+        # BS-5000“暗电流检测”在 Word 中是一个物理表格，但 Excel 分成
+        # “内圈暗电流测试”和“外圈暗电流测试”两个数据块。这里局部、精确地
+        # 分别填充两个区域，禁止修改通用评分/行匹配规则，避免修复一个章节后
+        # 影响其他章节。
+        split_sources = _dark_current_split_sources(wb, excel_blocks, module)
+        if split_sources is not None:
+            inner_src, outer_src = split_sources
+            if inner_src is None or outer_src is None:
+                missing_parts = []
+                if inner_src is None:
+                    missing_parts.append('内圈')
+                if outer_src is None:
+                    missing_parts.append('外圈')
+                match_logs.append(MatchLog(
+                    word_table_index=wb.index, word_section=wb.section, word_object=wb.object_name,
+                    module=module, excel_sheet='', excel_start_row=0, excel_end_row=0,
+                    excel_section='暗电流检测', excel_object='', score=0.0,
+                    note='暗电流精确匹配缺少' + '/'.join(missing_parts) + '数据块，未填充',
+                ))
+                continue
+
+            match_logs.append(MatchLog(
+                word_table_index=wb.index, word_section=wb.section, word_object='内圈+外圈暗电流测试',
+                module=module, excel_sheet=inner_src.sheet,
+                excel_start_row=min(inner_src.start_row, outer_src.start_row),
+                excel_end_row=max(inner_src.end_row, outer_src.end_row),
+                excel_section='暗电流检测', excel_object='内圈暗电流测试 + 外圈暗电流测试',
+                score=200.0, note='已匹配',
+            ))
+            fill_logs.extend(_fill_table_from_block(
+                wb, inner_src, raw_only=raw_only, overwrite_nonblank=overwrite_nonblank
+            ))
+            fill_logs.extend(_fill_table_from_block(
+                wb, outer_src, raw_only=raw_only, overwrite_nonblank=overwrite_nonblank
+            ))
+            continue
+
         src, score = _choose_block(wb, excel_blocks, module)
-        if src is None and module != 'M1' and not _has_explicit_module_hint(wb):
-            fallback_src, fallback_score = _choose_block(wb, excel_blocks, 'M1')
-            if fallback_src is not None:
-                module = 'M1'
-                src = fallback_src
-                score = fallback_score
         if src is None:
+            fill_logs.extend(_clear_unmatched_template_values(wb, module))
             match_logs.append(MatchLog(
                 word_table_index=wb.index, word_section=wb.section, word_object=wb.object_name,
                 module=module, excel_sheet='', excel_start_row=0, excel_end_row=0,
@@ -784,8 +1080,7 @@ def fill_report_tables(
             module=module, excel_sheet=src.sheet, excel_start_row=src.start_row, excel_end_row=src.end_row,
             excel_section=src.section, excel_object=src.object_name, score=score, note='已匹配',
         ))
-        fill_candidates = _candidate_blocks_for_fill(wb, excel_blocks, module, src)
-        fill_logs.extend(_fill_table_from_blocks(wb, fill_candidates, raw_only=raw_only, overwrite_nonblank=overwrite_nonblank))
+        fill_logs.extend(_fill_table_from_block(wb, src, raw_only=raw_only, overwrite_nonblank=overwrite_nonblank))
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

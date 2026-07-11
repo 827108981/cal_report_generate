@@ -1,3 +1,4 @@
 python-docx>=1.1.2
 openpyxl>=3.1.2
 pywin32>=306; platform_system == "Windows"
+Pillow>=10.0

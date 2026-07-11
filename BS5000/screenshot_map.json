@@ -1,0 +1,13 @@
+{
+  "model": "bs5000",
+  "chapter": "九、原始数据",
+  "items": [
+    {"item_id": "09_01_WASTE_DISCHARGE", "display_name": "废液排放情况", "anchor": "1、废液排放情况", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_02_SYSTEM_OVERVIEW", "display_name": "系统概述", "anchor": "2、系统概述", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_03_POWER", "display_name": "电源", "anchor": "3、电源", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_04_FLUID_PATH", "display_name": "液路", "anchor": "4、液路", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_05_LOWER_UNIT", "display_name": "下位机单元", "anchor": "5、下位机单元", "required": true, "min_count": 1, "multiple": true, "max_count": 20},
+    {"item_id": "09_06_PERFORMANCE", "display_name": "性能验证", "anchor": "性能验证：", "required": true, "min_count": 1, "multiple": true, "max_count": 30},
+    {"item_id": "09_07_REPEATABILITY", "display_name": "重复性", "anchor": "7、重复性", "required": true, "min_count": 1, "multiple": true, "max_count": 30}
+  ]
+}

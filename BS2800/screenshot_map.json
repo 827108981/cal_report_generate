@@ -1,0 +1,15 @@
+{
+  "model": "bs2800",
+  "chapter": "九、原始数据",
+  "items": [
+    {"item_id": "09_01_ENVIRONMENT", "display_name": "环境信息", "anchor": "环境信息", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_02_POWER", "display_name": "电源", "anchor": "电源", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_03_DARK_CURRENT", "display_name": "暗电流", "anchor": "暗电流", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_04_PRESSURE", "display_name": "工作压力", "anchor": "工作压力", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_05_TEMPERATURE_CURVE", "display_name": "反应盘温度曲线", "anchor": "反应盘温度曲线", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_06_COUNTER", "display_name": "计数", "anchor": "计数", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_07_CONTAINER", "display_name": "容器状态", "anchor": "容器状态", "required": true, "min_count": 1, "multiple": true, "max_count": 10},
+    {"item_id": "09_08_COMBINATION", "display_name": "组合", "anchor": "组合", "required": true, "min_count": 1, "multiple": true, "max_count": 20},
+    {"item_id": "09_09_ISE", "display_name": "ISE设置界面", "anchor": "ISE设置界面", "required": true, "min_count": 1, "multiple": true, "max_count": 10}
+  ]
+}

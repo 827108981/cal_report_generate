@@ -1,0 +1,27 @@
+{
+  "task_id": "20260711_104045_BS5000",
+  "model_key": "bs5000",
+  "created_at": "2026-07-11T10:41:22",
+  "assets": {
+    "09_01_WASTE_DISCHARGE": [
+      {
+        "order": 1,
+        "file": "screenshots\\BS5000_09_01_WASTE_DISCHARGE_01.png",
+        "source_type": "capture",
+        "original_path": "",
+        "width": 1467,
+        "height": 871,
+        "sha256": "0842e54ebd99d6bee552e677bd201c54b956aa5bc9cc8e9df803f9c5b5d7e544"
+      },
+      {
+        "order": 2,
+        "file": "screenshots\\BS5000_09_01_WASTE_DISCHARGE_02.png",
+        "source_type": "capture",
+        "original_path": "",
+        "width": 1920,
+        "height": 1200,
+        "sha256": "8a73cd7876af7bc3b9a3694ffba6ea3374d927cb616ed4ae9cdfc3a1b620480f"
+      }
+    ]
+  }
+}
